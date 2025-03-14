@@ -80,9 +80,11 @@ class FactorAnalysis(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
         The initial guess of the noise variance for each feature.
         If None, it defaults to np.ones(n_features).
 
-    svd_method : {'lapack', 'randomized'}, default='randomized'
+    svd_method : {'lapack', 'randomized','eig'}, default='randomized'
         Which SVD method to use. If 'lapack' use standard SVD from
         scipy.linalg, if 'randomized' use fast ``randomized_svd`` function.
+        If 'eig' instead construct the covariance matrix of X, and perform an
+        eigendecomposition.  This is useful when data is missing.
         Defaults to 'randomized'. For most applications 'randomized' will
         be sufficiently precise while providing significant speed gains.
         Accuracy can also be improved by setting higher values for
@@ -169,7 +171,7 @@ class FactorAnalysis(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
         "copy": ["boolean"],
         "max_iter": [Interval(Integral, 1, None, closed="left")],
         "noise_variance_init": ["array-like", None],
-        "svd_method": [StrOptions({"randomized", "lapack"})],
+        "svd_method": [StrOptions({"randomized", "lapack", "eig"})],
         "iterated_power": [Interval(Integral, 0, None, closed="left")],
         "rotation": [StrOptions({"varimax", "quartimax"}), None],
         "random_state": ["random_state"],
@@ -260,7 +262,7 @@ class FactorAnalysis(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
                     squared_norm(s[n_components:]),
                 )
 
-        else:  # svd_method == "randomized"
+        elif self.svd_method == "randomized":
             random_state = check_random_state(self.random_state)
 
             def my_svd(X):
@@ -271,6 +273,53 @@ class FactorAnalysis(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
                     n_iter=self.iterated_power,
                 )
                 return s, Vt, squared_norm(X) - squared_norm(s)
+
+        elif self.svd_method == 'eig':
+
+            def self_inner(X,min_obs=None):
+                """Compute inner product X.T@X, allowing for possibility of missing data."""
+                n,m=X.shape
+
+                if n<m:
+                    axis=1
+                    N=m
+                else:
+                    axis=0
+                    N=n
+
+                mX = np.ma.masked_invalid(X)
+
+                xbar = np.mean(mX,axis=axis)
+
+                if axis:
+                    C=(N-1)*np.ma.cov(mX)
+                else:
+                    C=(N-1)*np.ma.cov(mX.T)
+
+                return C + N*np.outer(xbar,xbar)
+
+            def my_svd(X):
+                P = self_inner(X)
+
+                sigmas,v=np.linalg.eigh(P)
+                vt = v.T
+
+                order=np.argsort(-sigmas)
+                sigmas=sigmas[order]
+
+                # Truncate rank of representation using Kaiser criterion (positive eigenvalues)
+                vt=vt[order,:]
+                vt=vt[sigmas>0,:]
+                s=np.sqrt(sigmas[sigmas>0])
+
+                if n_components is not None and len(s) > n_components:
+                    vt=vt[:n_components,:]
+                    s=s[:n_components]
+
+                r=len(s)
+
+                return s, vt, squared_norm(P) - squared_norm(s)
+
 
         for i in range(self.max_iter):
             # SMALL helps numerics
